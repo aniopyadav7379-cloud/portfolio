@@ -1,18 +1,65 @@
 import { useRef, useState } from 'react';
 import { motion, useScroll, useTransform } from 'framer-motion';
 
+const MIN_MESSAGE_CHARS = 10;
+// local@domain.tld — no spaces, exactly one @, at least one dot in the domain, TLD of 2+ chars
+const EMAIL_PATTERN = /^[^\s@]+@([^\s@.]+\.)+[^\s@.]{2,}$/;
+// DOM order of the fields; also the ids of the inputs, so we can focus the first invalid one
+const FIELD_ORDER = ['firstName', 'lastName', 'email', 'message', 'permission'];
+const INITIAL_FORM = { firstName: '', lastName: '', email: '', message: '', permission: false };
+
+const FIELD_CLASSES =
+  "w-full bg-transparent border-b pb-3 text-lg focus:outline-none focus:border-red-600 transition-colors placeholder-white/40 font-medium rounded-none text-white";
+
+// Pure validation: trims text before checking and returns { fieldId: 'message' } for each invalid field.
+const validate = (values) => {
+  const errors = {};
+
+  if (!values.firstName.trim()) {
+    errors.firstName = 'Please enter your first name.';
+  }
+  if (!values.lastName.trim()) {
+    errors.lastName = 'Please enter your last name.';
+  }
+
+  const email = values.email.trim();
+  if (!email) {
+    errors.email = 'Please enter your email address.';
+  } else if (!EMAIL_PATTERN.test(email)) {
+    errors.email = 'Please enter a valid email address, like name@example.com.';
+  }
+
+  const message = values.message.trim();
+  if (!message) {
+    errors.message = 'Please enter a message.';
+  } else if (message.replace(/\s/g, '').length < MIN_MESSAGE_CHARS) {
+    errors.message = `Your message needs at least ${MIN_MESSAGE_CHARS} characters (spaces don't count).`;
+  }
+
+  if (!values.permission) {
+    errors.permission = 'Please tick the box to give permission to contact you.';
+  }
+
+  return errors;
+};
+
+// The icon and the text carry the error, so it never relies on colour alone. The icon is hidden from screen readers.
+const FieldError = ({ id, message }) =>
+  message ? (
+    <p id={`${id}-error`} className="mt-3 flex items-start gap-2 text-xs font-mono text-red-400">
+      <span aria-hidden="true">⚠</span>
+      <span>{message}</span>
+    </p>
+  ) : null;
+
 const Contact = () => {
   const ref = useRef(null);
   
   // React Form State tracking
-  const [formData, setFormData] = useState({
-    firstName: '',
-    lastName: '',
-    email: '',
-    message: '',
-    permission: false
-  });
+  const [formData, setFormData] = useState(INITIAL_FORM);
   const [status, setStatus] = useState('idle'); // idle | sending | sent | error
+  const [errors, setErrors] = useState({}); // { fieldId: message } — only populated after a submit attempt
+  const [submitAttempted, setSubmitAttempted] = useState(false);
 
   const { scrollYProgress } = useScroll({
     target: ref,
@@ -22,23 +69,58 @@ const Contact = () => {
   // Parallax translation for the big background text
   const y = useTransform(scrollYProgress, [0, 1], ["-10%", "20%"]);
 
+  // Re-check one field and show or clear just its message
+  const revalidateField = (id, values) => {
+    const fieldError = validate(values)[id];
+    setErrors((prev) => {
+      const next = { ...prev };
+      if (fieldError) next[id] = fieldError;
+      else delete next[id];
+      return next;
+    });
+  };
+
   // Handle input changes dynamically
   const handleChange = (e) => {
     const { id, value, type, checked } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [id]: type === 'checkbox' ? checked : value
-    }));
+    const nextData = { ...formData, [id]: type === 'checkbox' ? checked : value };
+    setFormData(nextData);
+
+    // Editing after a successful send puts the button back to "Send Message"
+    if (status === 'sent') setStatus('idle');
+
+    // After a failed submit, update messages live: fields already showing an error (and the checkbox) re-check on change
+    if (submitAttempted && (type === 'checkbox' || errors[id])) {
+      revalidateField(id, nextData);
+    }
   };
 
-  // Handle form submission logic — sends the message straight to Anoop's email via FormSubmit
+  // After a failed submit, also re-check a field when the user leaves it
+  const handleBlur = (e) => {
+    if (submitAttempted) revalidateField(e.target.id, formData);
+  };
+
+  // Handle form submission logic — validates first, then sends the message straight to Anoop's email via FormSubmit
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (status === 'sending') return;
 
-    if (!formData.permission) {
-      alert("Please accept the contact permission checkbox.");
+    setSubmitAttempted(true);
+    const nextErrors = validate(formData);
+    setErrors(nextErrors);
+
+    const firstInvalid = FIELD_ORDER.find((id) => nextErrors[id]);
+    if (firstInvalid) {
+      setStatus('idle');
+      document.getElementById(firstInvalid)?.focus();
       return;
     }
+
+    // Trim what the user typed before sending it
+    const firstName = formData.firstName.trim();
+    const lastName = formData.lastName.trim();
+    const email = formData.email.trim();
+    const message = formData.message.trim();
 
     setStatus('sending');
 
@@ -47,9 +129,9 @@ const Contact = () => {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
-          name: `${formData.firstName} ${formData.lastName}`,
-          email: formData.email,
-          message: formData.message,
+          name: `${firstName} ${lastName}`,
+          email,
+          message,
           _subject: "New message from portfolio site"
         })
       });
@@ -57,12 +139,22 @@ const Contact = () => {
       if (!res.ok) throw new Error("Send failed");
 
       setStatus('sent');
-      setFormData({ firstName: '', lastName: '', email: '', message: '', permission: false });
+      setFormData(INITIAL_FORM);
+      setErrors({});
+      setSubmitAttempted(false);
     } catch (err) {
       console.error(err);
       setStatus('error');
     }
   };
+
+  // aria wiring shared by every field: invalid state + link to its message (only when a message exists)
+  const a11yProps = (id) => ({
+    'aria-invalid': errors[id] ? 'true' : 'false',
+    'aria-describedby': errors[id] ? `${id}-error` : undefined,
+    onBlur: handleBlur
+  });
+  const underline = (id) => (errors[id] ? 'border-red-500' : 'border-white/20');
 
   return (
     <section ref={ref} id="contact" className="bg-[#0b0b0b] w-full min-h-screen relative overflow-hidden flex items-end pt-32 pb-0 border-t border-white/10 select-none">
@@ -105,12 +197,13 @@ const Contact = () => {
             </span>
           </div>
 
-          <form onSubmit={handleSubmit} className="flex flex-col gap-12 md:gap-16 w-full">
+          <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-12 md:gap-16 w-full">
             <div className="flex flex-col md:flex-row gap-12 md:gap-20 w-full">
               
               {/* Left Column */}
               <div className="flex-1 flex flex-col gap-10">
                 <div className="relative">
+                  <label htmlFor="firstName" className="sr-only">First name</label>
                   <input 
                     type="text" 
                     id="firstName" 
@@ -118,10 +211,13 @@ const Contact = () => {
                     onChange={handleChange}
                     placeholder="First Name" 
                     required
-                    className="w-full bg-transparent border-b border-white/20 pb-3 text-lg focus:outline-none focus:border-red-600 transition-colors placeholder-white/40 font-medium rounded-none text-white"
+                    {...a11yProps('firstName')}
+                    className={`${FIELD_CLASSES} ${underline('firstName')}`}
                   />
+                  <FieldError id="firstName" message={errors.firstName} />
                 </div>
                 <div className="relative">
+                  <label htmlFor="lastName" className="sr-only">Last name</label>
                   <input 
                     type="text" 
                     id="lastName" 
@@ -129,10 +225,13 @@ const Contact = () => {
                     onChange={handleChange}
                     placeholder="Last Name" 
                     required
-                    className="w-full bg-transparent border-b border-white/20 pb-3 text-lg focus:outline-none focus:border-red-600 transition-colors placeholder-white/40 font-medium rounded-none text-white"
+                    {...a11yProps('lastName')}
+                    className={`${FIELD_CLASSES} ${underline('lastName')}`}
                   />
+                  <FieldError id="lastName" message={errors.lastName} />
                 </div>
                 <div className="relative">
+                  <label htmlFor="email" className="sr-only">Email address</label>
                   <input 
                     type="email" 
                     id="email" 
@@ -140,22 +239,27 @@ const Contact = () => {
                     onChange={handleChange}
                     placeholder="Email Address" 
                     required
-                    className="w-full bg-transparent border-b border-white/20 pb-3 text-lg focus:outline-none focus:border-red-600 transition-colors placeholder-white/40 font-medium rounded-none text-white"
+                    {...a11yProps('email')}
+                    className={`${FIELD_CLASSES} ${underline('email')}`}
                   />
+                  <FieldError id="email" message={errors.email} />
                 </div>
               </div>
 
               {/* Right Column */}
               <div className="flex-1 flex flex-col">
                 <div className="relative h-full flex flex-col">
+                  <label htmlFor="message" className="sr-only">Message</label>
                   <textarea 
                     id="message" 
                     value={formData.message}
                     onChange={handleChange}
                     placeholder="Type your message here..." 
                     required
-                    className="w-full h-full min-h-[140px] bg-transparent border-b border-white/20 pb-3 text-lg focus:outline-none focus:border-red-600 transition-colors placeholder-white/40 font-medium resize-none rounded-none text-white"
+                    {...a11yProps('message')}
+                    className={`flex-1 min-h-[140px] ${FIELD_CLASSES} ${underline('message')} resize-none`}
                   ></textarea>
+                  <FieldError id="message" message={errors.message} />
                 </div>
               </div>
             </div>
@@ -163,18 +267,23 @@ const Contact = () => {
             {/* Bottom Section */}
             <div className="flex flex-col md:flex-row gap-12 mt-4 pt-6 border-t border-white/10">
               {/* Left text */}
-              <div className="flex-1 flex items-start gap-4 text-sm font-light text-white/70">
-                <input 
-                  type="checkbox" 
-                  id="permission" 
-                  checked={formData.permission}
-                  onChange={handleChange}
-                  className="mt-1 w-4 h-4 rounded-sm border-white/30 bg-transparent text-red-600 focus:ring-0 focus:ring-offset-0 cursor-pointer" 
-                  style={{ accentColor: "#E50914" }}
-                />
-                <label htmlFor="permission" className="cursor-pointer max-w-[280px] leading-snug">
-                  I give permission to contact me at this email address.
-                </label>
+              <div className="flex-1">
+                <div className="flex items-start gap-4 text-sm font-light text-white/70">
+                  <input 
+                    type="checkbox" 
+                    id="permission" 
+                    checked={formData.permission}
+                    onChange={handleChange}
+                    required
+                    {...a11yProps('permission')}
+                    className="mt-1 w-4 h-4 rounded-sm border-white/30 bg-transparent text-red-600 focus:ring-0 focus:ring-offset-0 cursor-pointer" 
+                    style={{ accentColor: "#E50914" }}
+                  />
+                  <label htmlFor="permission" className="cursor-pointer max-w-[280px] leading-snug">
+                    I give permission to contact me at this email address.
+                  </label>
+                </div>
+                <FieldError id="permission" message={errors.permission} />
               </div>
 
               {/* Right text & button */}
@@ -198,12 +307,22 @@ const Contact = () => {
                     </svg>
                   </button>
                 </div>
-                {status === 'sent' && (
-                  <p className="text-xs text-green-500 font-mono">Thanks! Your message has been sent — I'll get back to you soon.</p>
-                )}
-                {status === 'error' && (
-                  <p className="text-xs text-red-500 font-mono">Something went wrong sending your message — please email me directly at aniopyadav7379@gmail.com.</p>
-                )}
+                {/* Live regions stay mounted so screen readers announce changes. While empty, -mt-8 cancels the parent's gap-8 so layout is unchanged. */}
+                <div className={status === 'sent' || status === 'error' ? '' : '-mt-8'}>
+                  <div role="status">
+                    {status === 'sending' && <p className="sr-only">Sending your message…</p>}
+                    {status === 'sent' && (
+                      <p className="text-xs text-green-500 font-mono">Thanks! Your message has been sent — I'll get back to you soon.</p>
+                    )}
+                  </div>
+                  <div role="alert">
+                    {status === 'error' && (
+                      <p className="text-xs text-red-500 font-mono">
+                        <span aria-hidden="true">⚠ </span>Something went wrong sending your message — please email me directly at aniopyadav7379@gmail.com.
+                      </p>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           </form>
